@@ -1,7 +1,5 @@
 <?php
 
-namespace HipChat;
-
 /**
  * Library for interacting with the HipChat REST API.
  *
@@ -18,6 +16,7 @@ class HipChat {
    */
   const STATUS_BAD_RESPONSE = -1; // Not an HTTP response code
   const STATUS_OK = 200;
+  const STATUS_OK_NO_CONTENT = 204;
   const STATUS_BAD_REQUEST = 400;
   const STATUS_UNAUTHORIZED = 401;
   const STATUS_FORBIDDEN = 403;
@@ -46,6 +45,7 @@ class HipChat {
    * API versions
    */
   const VERSION_1 = 'v1';
+  const VERSION_2 = 'v2';
 
   private $api_target;
   private $auth_token;
@@ -102,6 +102,24 @@ class HipChat {
       throw $e;
     }
     return true;
+  }
+
+  /**
+   * Send a message to a room
+   *
+   * @see http://api.hipchat.com/docs/api/method/rooms/message
+   */
+  public function post_room_notification($room_id, $message, $notify = false,
+                               $color = self::COLOR_YELLOW,
+                               $message_format = self::FORMAT_HTML) {
+    $args = array(
+      'message' => $message,
+      'notify' => (int)$notify,
+      'color' => $color,
+      'message_format' => $message_format
+    );
+    $this->make_request('room/' . $room_id . '/notification', $args, 'POST');
+    return TRUE;
   }
 
   /**
@@ -367,27 +385,38 @@ class HipChat {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($ch, CURLOPT_TIMEOUT, $this->request_timeout);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->verify_ssl);
+    if($this->api_version == self::VERSION_2) {
+      $v2header = array(
+        'Authorization: Bearer ' . $this->auth_token
+      );
+      if(is_array($post_data)) {
+        $v2header[] = 'Content-Type: application/x-www-form-urlencoded';
+      }
+      curl_setopt($ch, CURLOPT_HTTPHEADER, $v2header);
+    }
     if (isset($this->proxy)) {
       curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, 1);
       curl_setopt($ch, CURLOPT_PROXY, $this->proxy);
     }
     if (is_array($post_data)) {
       curl_setopt($ch, CURLOPT_POST, 1);
-      curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+      curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post_data));
     }
     $response = curl_exec($ch);
 
-    // make sure we got a real response
-    if (strlen($response) == 0) {
-      $errno = curl_errno($ch);
-      $error = curl_error($ch);
-      throw new HipChat_Exception(self::STATUS_BAD_RESPONSE,
-        "CURL error: $errno - $error", $url);
+    if($this->api_version == self::VERSION_1) {
+      // make sure we got a real response
+      if (strlen($response) == 0) {
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        throw new HipChat_Exception(self::STATUS_BAD_RESPONSE,
+          "CURL error: $errno - $error", $url);
+      }
     }
 
-    // make sure we got a 200
+    // make sure we got a 200 or 204 (no content)
     $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    if ($code != self::STATUS_OK) {
+    if ($code != self::STATUS_OK && $code != self::STATUS_OK_NO_CONTENT) {
       throw new HipChat_Exception($code,
         "HTTP status code: $code, response=$response", $url);
     }
@@ -428,8 +457,10 @@ class HipChat {
    */
   public function make_request($api_method, $args = array(),
                                $http_method = 'GET') {
-    $args['format'] = 'json';
-    $args['auth_token'] = $this->auth_token;
+    if($this->api_version == self::VERSION_1) {
+      $args['format'] = 'json';
+      $args['auth_token'] = $this->auth_token;
+    }
     $url = "$this->api_target/$this->api_version/$api_method";
     $post_data = null;
 
@@ -442,13 +473,14 @@ class HipChat {
 
     $response = $this->curl_request($url, $post_data);
 
-    // make sure response is valid json
-    $response = json_decode($response);
-    if (!$response) {
-      throw new HipChat_Exception(self::STATUS_BAD_RESPONSE,
-        "Invalid JSON received: $response", $url);
+    // make sure response is valid json, if there is a response
+    if($response) {
+      $response = json_decode($response);
+      if (!$response) {
+        throw new HipChat_Exception(self::STATUS_BAD_RESPONSE,
+          "Invalid JSON received: $response", $url);
+      }
     }
-
     return $response;
   }
 
